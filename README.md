@@ -1,7 +1,7 @@
-* Pipe detection script
+# Pipe detection script
 
 
-** About
+## About
 A script to detect the use of curl or wget -O - | bash.
 
 See https://www.idontplaydarts.com/2016/04/detecting-curl-pipe-bash-server-side/
@@ -14,7 +14,7 @@ The original site is down so I've included the code here.
 See https://web.archive.org/web/20250622061208/https://www.idontplaydarts.com/2016/04/detecting-curl-pipe-bash-server-side/ for the archived version.
 
 
-** License
+## License
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
 the Free Software Foundation, either version 3 of the License, or
