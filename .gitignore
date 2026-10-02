@@ -1,0 +1,10 @@
+# TLS material generated at runtime / build time — never commit these.
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+
+# local env
+.env
+.venv/
