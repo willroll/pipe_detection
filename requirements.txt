@@ -1,1 +1,3 @@
-numpy
+# Runtime dependencies.
+# The server is stdlib-only (variance is computed with the `statistics` module),
+# so there are no third-party requirements. Kept for `pip install -r` in Docker.
